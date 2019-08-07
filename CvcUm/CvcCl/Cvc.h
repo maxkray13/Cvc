@@ -4,6 +4,10 @@
 Cvc - Communication via callback function prefix
 */
 
+typedef NTSTATUS
+(__fastcall*CvcThreadStart_t)
+(const pCvcConnection pConnection);
+
 NTSTATUS
 CvcCreate(
 	VOID
@@ -14,21 +18,36 @@ CvcTerminate(
 	VOID
 );
 
+VOID
+CvcWaitConnections(
+	VOID
+);
+
+BOOLEAN
+CvcConnectionActive(
+	const pCvcConnection Connection
+);
+
+NTSTATUS
+CvcSpawnThread(
+	const CvcThreadStart_t ThreadStart
+);
+
 NTSTATUS
 CvcPostEx(
-	const HANDLE Event,
 	const PVOID pData,
-	const ULONG DataLen
+	const ULONG DataLen,
+	const pCvcConnection pConnection
 );
 
 NTSTATUS
 CvcPostHelloWorld(
-	const HANDLE Event
+	const pCvcConnection CurrentConnection
 );
 
 NTSTATUS
 CvcPostRead(
-	const HANDLE Event,
+	const pCvcConnection pCurrentConnection,
 	const HANDLE Pid,
 	const DWORD64 Ptr,
 	const ULONG Size,
@@ -37,7 +56,7 @@ CvcPostRead(
 
 NTSTATUS
 CvcPostWrite(
-	const HANDLE Event,
+	const pCvcConnection pCurrentConnection,
 	const HANDLE Pid,
 	const DWORD64 Ptr,
 	const ULONG Size,
