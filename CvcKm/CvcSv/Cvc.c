@@ -485,9 +485,8 @@ CvcpOpenAdapterHook(
 		ConnectionRequest Request = { .CompliteEvent = NULL, .Connection = NULL};
 		
 		__try {
-
-			const pConnectionRequest pRequest = (pConnectionRequest)CvciGetUserArgument();
-			RtlCopyMemory(&Request, pRequest, sizeof(ConnectionRequest));
+		
+			RtlCopyMemory(&Request, CvciGetUserArgument(), sizeof(ConnectionRequest));
 		}
 		__except(EXCEPTION_EXECUTE_HANDLER) {
 
