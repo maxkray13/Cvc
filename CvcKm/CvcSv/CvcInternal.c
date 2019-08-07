@@ -1006,6 +1006,15 @@ CvciExit(
 	}
 }
 
+PVOID
+CvciGetUserArgument(
+	VOID
+) {
+
+	const _PKTRAP_FRAME Trap = *(_PKTRAP_FRAME*)((DWORD64)KeGetCurrentThread() + OfTrapFrame);
+	return *(PVOID*)(Trap->Rbp + 0x8);
+}
+
 /*
 Irql must be PASSIVE_LEVEL
 All apc must be enabled
@@ -1013,6 +1022,7 @@ All apc must be enabled
 NTSTATUS
 CvciUsermodeCallout(
 	CvcMsgTypeKe	MsgType,
+	PVOID			pConnection,
 	PVOID			Dispatcher,
 	PVOID			InputBuffer,
 	ULONG			InputLength,
@@ -1042,6 +1052,7 @@ CvciUsermodeCallout(
 		CalloutFrame->MsgType = MsgType;
 		CalloutFrame->Buffer = (PVOID)(CalloutFrame + 1);
 		CalloutFrame->Length = InputLength;
+		CalloutFrame->pConnection = pConnection;
 	}
 	__except (EXCEPTION_EXECUTE_HANDLER) {
 
@@ -1098,7 +1109,6 @@ CvciUsermodeCallout(
 			0
 		);
 	}
-
 	Trap->Rsp = OldStack;
 
 	return Status;
