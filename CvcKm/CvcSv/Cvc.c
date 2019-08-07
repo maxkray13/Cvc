@@ -9,162 +9,135 @@ BOOLEAN Shutdown = FALSE;
 KGUARDED_MUTEX CvcMutex;
 PEPROCESS ClientProcess = NULL;
 PVOID pfnDispatcher = NULL;
+HANDLE CvcpPendingThreadId = NULL;
+
 
 extern OpenAdapter_t pfOpenAdapter;
 
 #pragma code_seg(push)
 #pragma code_seg("PAGE")
 
-/*
-Main function of processing user messages.
-Determines if connection should be closed.
-*/
-BOOLEAN
-CvcpProcessUserMessage(
-	const PVOID InputData,
-	const ULONG InputDataLen
+NTSTATUS
+CvcpOpenAdapterHook(
+	PVOID Arg
 );
 
 NTSTATUS
-CvcpProcessHelloWorldMsg(
-	const pCvcHelloWorld Message
-);
-
-NTSTATUS
-CvcpProcessReadMsg(
-	const pCvcRead Message
-);
-
-NTSTATUS
-CvcpProcessWriteMsg(
-	const pCvcWrite Message
-);
-
-VOID
-CvcpDispatcher(
-	VOID
+CvcpProcessAddConnectionMsg(
+	const pCvcAddConnection Message
 ) {
 
-	while (!Shutdown && !PsIsThreadTerminating(KeGetCurrentThread())) {
+	PAGED_CODE();
 
-		PVOID Input = NULL;
-		ULONG InputLen = 0;
+	NTSTATUS Status = STATUS_SUCCESS;
 
-		CvciUsermodeCallout(
-			CVCKE_NOP,
-			pfnDispatcher,
-			NULL,
-			0,
-			&Input,
-			&InputLen
-		);
+	PETHREAD SlaveThread = NULL;
+	PRKEVENT RequestEvent = NULL;
+	PRKEVENT CompliteEvent = NULL;
 
-		if (Input && InputLen) {
-
-			if (!CvcpProcessUserMessage(Input, InputLen)) {
-
-				/*
-				Something hardly messed up - break connection
-				*/
-				DbgPrint("%s: Break connection\n", __FUNCTION__);
-				return;
-			}
-		}
-
-		LARGE_INTEGER WaitTime = { .QuadPart = -8000 };
-
-		KeDelayExecutionThread(
-			UserMode,
-			TRUE,
-			&WaitTime
-		);
-	}
-}
-
-
-BOOLEAN
-CvcpProcessUserMessage(
-	const PVOID InputData,
-	const ULONG InputDataLen
-) {
-
-	NTSTATUS UserStatus = STATUS_SUCCESS;
-	pCvcCLMsg ClMessage = (pCvcCLMsg)ALIGN_UP_BY(
-		alloca(InputDataLen + MEMORY_ALLOCATION_ALIGNMENT),
-		MEMORY_ALLOCATION_ALIGNMENT
+	Status = ObReferenceObjectByHandleWithTag(
+		Message->SlaveHandle,
+		(ACCESS_MASK)2,
+		*PsThreadType,
+		UserMode,
+		'tlfD',
+		&SlaveThread,
+		NULL
 	);
 
-	__try {
+	if (!NT_SUCCESS(Status)) {
 
-		RtlSecureZeroMemory(ClMessage, InputDataLen);
-		RtlCopyMemory(ClMessage, InputData, InputDataLen);
-
-	}
-	__except (EXCEPTION_EXECUTE_HANDLER) {
-
-		ClMessage = NULL;
-		UserStatus = GetExceptionCode();
+		DbgPrint("%s: Cannot reference thread\n", __FUNCTION__);
+		goto FinalStub;
 	}
 
-	if (!ClMessage || !NT_SUCCESS(UserStatus)) {
-
-		DbgPrint("%s: Exception occured while trying to access user message\n", __FUNCTION__);
-		return FALSE;
-	}
-
-	__try {
-
-		*ClMessage->pResultStatus = STATUS_SUCCESS;
-	}
-	__except (EXCEPTION_EXECUTE_HANDLER) {
-
-		UserStatus = GetExceptionCode();
-	}
-
-	if (!NT_SUCCESS(UserStatus)) {
-
-		DbgPrint("%s: Exception while trying to write ResultStatus\n", __FUNCTION__);
-		return FALSE;
-	}
-
-	PRKEVENT Event;
-	UserStatus = ObReferenceObjectByHandleWithTag(
-		ClMessage->Event,
+	Status = ObReferenceObjectByHandleWithTag(
+		Message->RequestEvent,
 		(ACCESS_MASK)2,
 		*ExEventObjectType,
 		UserMode,
 		'tlfD',
-		&Event,
+		&RequestEvent,
 		NULL
 	);
 
-	if (!NT_SUCCESS(UserStatus)) {
+	if (!NT_SUCCESS(Status)) {
 
-		DbgPrint("%s: Cannot reference event\n", __FUNCTION__);
-		return FALSE;
+		DbgPrint("%s: Cannot reference RequestEvent\n", __FUNCTION__);
+		goto FinalStub;
 	}
 
-	switch (((pCvcNull)&ClMessage->Data)->Type)
-	{
-	case CVCCL_HELLO_WORLD:
-		UserStatus = CvcpProcessHelloWorldMsg((pCvcHelloWorld)&ClMessage->Data);
-		break;
-	case CVCCL_READ:
-		UserStatus = CvcpProcessReadMsg((pCvcRead)&ClMessage->Data);
-		break;
-	case CVCCL_WRITE:
-		UserStatus = CvcpProcessWriteMsg((pCvcWrite)&ClMessage->Data);
-		break;
-	default:
-		UserStatus = STATUS_INVALID_PARAMETER;
-		break;
+	Status = ObReferenceObjectByHandleWithTag(
+		Message->CompliteEvent,
+		(ACCESS_MASK)2,
+		*ExEventObjectType,
+		UserMode,
+		'tlfD',
+		&CompliteEvent,
+		NULL
+	);
+
+	if (!NT_SUCCESS(Status)) {
+
+		DbgPrint("%s: Cannot reference CompliteEvent\n", __FUNCTION__);
+		goto FinalStub;
 	}
 
-	*ClMessage->pResultStatus = UserStatus;
+	CvcpPendingThreadId = PsGetThreadId(SlaveThread);
 
-	KeSetEvent(Event, 1, FALSE);
-	ObDereferenceObject(Event);
-	return TRUE;
+	CvciHookOpenAdapter((PVOID)CvcpOpenAdapterHook);
+
+	KeSetEvent(RequestEvent, 1, FALSE);
+
+	LARGE_INTEGER Timeout = { .QuadPart = -8000 };
+
+	int RetryCount = 0;
+
+	while (KeWaitForSingleObject(
+		CompliteEvent,
+		Executive,
+		KernelMode,
+		TRUE,
+		&Timeout) != STATUS_WAIT_0) {
+
+		if (PsIsThreadTerminating(SlaveThread)) {
+
+			DbgPrint("%s: PsIsThreadTerminating(SlaveThread)\n", __FUNCTION__);
+			Status = STATUS_THREAD_IS_TERMINATING;
+			break;
+		}
+		else if (RetryCount > 0x60) {
+
+			DbgPrint("%s: RetryCount > 0x60\n", __FUNCTION__);
+			Status = STATUS_DRIVER_CANCEL_TIMEOUT;
+			break;
+		}
+
+		RetryCount++;
+	}
+
+FinalStub:;
+
+	if (SlaveThread) {
+
+		ObDereferenceObject(SlaveThread);
+	}
+
+	if (CompliteEvent) {
+
+		ObDereferenceObject(CompliteEvent);
+	}
+
+	if (RequestEvent) {
+
+		ObDereferenceObject(RequestEvent);
+	}
+
+	CvciUnhookOpenAdapter();
+
+	CvcpPendingThreadId = NULL;
+
+	return Status;
 }
 
 NTSTATUS
@@ -185,6 +158,7 @@ CvcpProcessHelloWorldMsg(
 
 		Status = CvciUsermodeCallout(
 			CVCKE_DISPLAY,
+			NULL,
 			pfnDispatcher,
 			UserOutput.Buffer,
 			UserOutput.MaximumLength,
@@ -195,7 +169,6 @@ CvcpProcessHelloWorldMsg(
 
 	return Status;
 }
-
 
 NTSTATUS
 CvcpProcessReadMsg(
@@ -275,6 +248,97 @@ CvcpProcessWriteMsg(
 	ObDereferenceObject(Process);
 
 	return Status;
+}
+
+BOOLEAN
+CvcpProcessUserMessage(
+	const BOOLEAN IsMainConnection,
+	const PVOID InputData,
+	const ULONG InputDataLen
+) {
+
+	NTSTATUS UserStatus = STATUS_SUCCESS;
+	pCvcCLMsg ClMessage = (pCvcCLMsg)ALIGN_UP_BY(
+		alloca(InputDataLen + MEMORY_ALLOCATION_ALIGNMENT),
+		MEMORY_ALLOCATION_ALIGNMENT
+	);
+
+	__try {
+
+		RtlSecureZeroMemory(ClMessage, InputDataLen);
+		RtlCopyMemory(ClMessage, InputData, InputDataLen);
+
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+
+		ClMessage = NULL;
+		UserStatus = GetExceptionCode();
+	}
+
+	if (!ClMessage || !NT_SUCCESS(UserStatus)) {
+
+		DbgPrint("%s: Exception occured while trying to access user message\n", __FUNCTION__);
+		return FALSE;
+	}
+
+	__try {
+
+		*ClMessage->pResultStatus = STATUS_SUCCESS;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+
+		UserStatus = GetExceptionCode();
+	}
+
+	if (!NT_SUCCESS(UserStatus)) {
+
+		DbgPrint("%s: Exception while trying to write ResultStatus\n", __FUNCTION__);
+		return FALSE;
+	}
+
+	PRKEVENT CompliteEvent;
+	UserStatus = ObReferenceObjectByHandleWithTag(
+		ClMessage->CompliteEvent,
+		(ACCESS_MASK)2,
+		*ExEventObjectType,
+		UserMode,
+		'tlfD',
+		&CompliteEvent,
+		NULL
+	);
+
+	if (!NT_SUCCESS(UserStatus)) {
+
+		DbgPrint("%s: Cannot reference event\n", __FUNCTION__);
+		return FALSE;
+	}
+
+	switch (((pCvcNull)&ClMessage->Data)->Type)
+	{
+	case CVCCL_ADD_CONNECTION:
+		UserStatus = IsMainConnection
+			? CvcpProcessAddConnectionMsg((pCvcAddConnection)&ClMessage->Data)
+			: STATUS_ILLEGAL_FUNCTION;
+		break;
+	case CVCCL_HELLO_WORLD:
+		UserStatus = CvcpProcessHelloWorldMsg((pCvcHelloWorld)&ClMessage->Data);
+		break;
+	case CVCCL_READ:
+		UserStatus = CvcpProcessReadMsg((pCvcRead)&ClMessage->Data);
+		break;
+	case CVCCL_WRITE:
+		UserStatus = CvcpProcessWriteMsg((pCvcWrite)&ClMessage->Data);
+		break;
+	default:
+		UserStatus = STATUS_INVALID_PARAMETER;
+		break;
+	}
+
+	*ClMessage->pResultStatus = UserStatus;
+
+	KeSetEvent(CompliteEvent, 1, FALSE);
+	ObDereferenceObject(CompliteEvent);
+	return TRUE;
 }
 
 VOID
@@ -365,6 +429,42 @@ BOOLEAN CvcpPrCmp(
 	return Correct;
 }
 
+VOID
+CvcpDispatcher(
+	const pCvcConnection pConnection
+) {
+
+	const BOOLEAN IsMainConnection = pConnection == NULL;
+
+	while (!Shutdown && !PsIsThreadTerminating(KeGetCurrentThread())) {
+
+		PVOID Input = NULL;
+		ULONG InputLen = 0;
+
+		NTSTATUS Status = CvciUsermodeCallout(
+			CVCKE_NOP,
+			pConnection,
+			pfnDispatcher,
+			NULL,
+			0,
+			&Input,
+			&InputLen
+		);
+
+		if (NT_SUCCESS(Status) && Input && InputLen) {
+
+			if (!CvcpProcessUserMessage(IsMainConnection, Input, InputLen)) {
+
+				/*
+				Something hardly messed up - break connection
+				*/
+				DbgPrint("%s: Break connection\n", __FUNCTION__);
+				return;
+			}
+		}
+	}
+}
+
 NTSTATUS
 CvcpOpenAdapterHook(
 	PVOID Arg
@@ -372,14 +472,67 @@ CvcpOpenAdapterHook(
 
 	KeAcquireGuardedMutex(&CvcMutex);
 
-	if (IoGetCurrentProcess() == ClientProcess) {
+	if (IoGetCurrentProcess() == ClientProcess &&
+		CvcpPendingThreadId
+		? CvcpPendingThreadId == PsGetCurrentThreadId()
+		: TRUE) {
 
 		CvciUnhookOpenAdapter();
 		KeReleaseGuardedMutex(&CvcMutex);
 
-		CvcpDispatcher();
+		NTSTATUS Status = STATUS_SUCCESS;
+
+		ConnectionRequest Request = { .CompliteEvent = NULL, .Connection = NULL};
+		
+		__try {
+
+			const pConnectionRequest pRequest = (pConnectionRequest)CvciGetUserArgument();
+			RtlCopyMemory(&Request, pRequest, sizeof(ConnectionRequest));
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER) {
+
+			DbgPrint("%s: Exception read request\n", __FUNCTION__);
+			Status = GetExceptionCode();
+		}
+
+		if (!NT_SUCCESS(Status)) {
+
+			return STATUS_CONNECTION_ABORTED;
+		}
+
+		if (CvcpPendingThreadId && Request.Connection) {
+
+			PRKEVENT CompliteEvent;
+
+			Status = ObReferenceObjectByHandleWithTag(
+				Request.CompliteEvent,
+				(ACCESS_MASK)2,
+				*ExEventObjectType,
+				UserMode,
+				'tlfD',
+				&CompliteEvent,
+				NULL
+			);
+
+			if (!NT_SUCCESS(Status)) {
+				DbgPrint("%s: Failed referencing hCompliteEvent\n", __FUNCTION__);
+				return STATUS_CONNECTION_ABORTED;
+			}
+			
+			KeSetEvent(CompliteEvent, 1, FALSE);
+			ObDereferenceObject(CompliteEvent);
+			CvcpPendingThreadId = NULL;
+		}
+		else if (CvcpPendingThreadId || Request.Connection) {
+
+			DbgPrint("%s: CvcpPendingThreadId || Request.Connection\n", __FUNCTION__);
+			return STATUS_CONNECTION_ABORTED;
+		}
+
+		CvcpDispatcher(Request.Connection);
 
 		return STATUS_CONNECTION_ABORTED;
+
 	}
 
 	KeReleaseGuardedMutex(&CvcMutex);
@@ -418,6 +571,7 @@ CvcTerminate(
 
 	PAGED_CODE();
 	Shutdown = TRUE;
+	CvcpPendingThreadId = NULL;
 
 	if (ClientProcess) {
 
