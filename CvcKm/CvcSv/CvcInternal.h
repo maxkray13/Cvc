@@ -20,16 +20,22 @@ CvciExit(
 	VOID
 );
 
+PVOID
+CvciGetUserArgument(
+	VOID
+);
+
 typedef struct _CALLOUT_FRAME {
 	CvcMsgTypeKe	MsgType;
-	PVOID			Buffer;
 	ULONG			Length;
-	ULONG			Spare[2];
+	PVOID			Buffer;
+	PVOID			pConnection;
 } CALLOUT_FRAME, *PCALLOUT_FRAME;
 
 NTSTATUS
 CvciUsermodeCallout(
 	CvcMsgTypeKe	MsgType,
+	PVOID			pConnection,
 	PVOID			Dispatcher,
 	PVOID			InputBuffer,
 	ULONG			InputLength,
