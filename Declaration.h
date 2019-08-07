@@ -1,4 +1,5 @@
 #pragma once
+#include "CvcUm/CRT/Semaphore.h"
 
 /*
 Kernelmode message type that describe what subroutine should be run on usermode
@@ -16,6 +17,7 @@ Usermode message type that describe what subroutine should be run on kernelmode
 */
 typedef enum _CvcMsgTypeCL
 {
+	CVCCL_ADD_CONNECTION,
 	CVCCL_HELLO_WORLD,
 	CVCCL_READ,
 	CVCCL_WRITE,
@@ -24,76 +26,109 @@ typedef enum _CvcMsgTypeCL
 }CvcMsgTypeCL, *pCvcMsgTypeCL;
 
 /*
-Usermode structure that used for managing messages and creating CvcCLMsg structure.
-Created internally and should be acessed internally only.
-*/
-typedef struct _CvcCLMsgHeader {
-	/*
-	User message bata len in bytes
-	*/
-	ULONG		DataLen;
-	/*
-	Double linked list that links user messages
-	*/
-	DECLSPEC_ALIGN(MEMORY_ALLOCATION_ALIGNMENT) LIST_ENTRY CvcMessagesLinks;
-	/*
-	Pointer to variable that will recive operation status
-	*/
-	volatile PNTSTATUS	pResultStatus;
-	/*
-	Event that used for synchronisation betwen kernelmode\usermode
-	*/
-	HANDLE		Event;
-	/*
-	Offset to user defined message
-	*/
-	CHAR		Data;
-}CvcCLMsgHeader, *pCvcCLMsgHeader;
-
-
-/*
 User message that will be passed to kernelmode dispatcher
 */
 typedef struct _CvcCLMsg {
 	/*
 	Pointer to variable that will recive operation status
 	*/
-	PNTSTATUS	pResultStatus;
+	volatile NTSTATUS *	pResultStatus;
 	/*
-	Event that used for synchronisation betwen kernelmode\usermode
+	Event that used for synchronisation betwen kernelmode\usermode. Will be in initial state when request are complited
 	*/
-	HANDLE		Event;
+	HANDLE				CompliteEvent;
 	/*
 	Offset to user defined message
 	*/
-	CHAR		Data;
+	CHAR				Data;
 }CvcCLMsg, *pCvcCLMsg;
 
-#ifndef CVCHEADER_COMMON
-/***/#define CVCHEADER_COMMON sizeof(PNTSTATUS) + sizeof(HANDLE)
+/*
+Usermode structure that describe connection and being used for communication.
+Created internally and should be acessed internally.
+*/
+typedef struct _CvcConnection {
+
+	/*
+	Thread id of master thread
+	*/
+	DWORD				MasterId;
+	/*
+	Thread id of slave thread
+	*/
+	DWORD				SlaveId;
+	/*
+	Handle to slave thread
+	*/
+	HANDLE				SlaveHandle;
+	/*
+	Double linked list that links connections
+	*/
+	LIST_ENTRY			CvcConnectionLinks;
+	/*
+	Handle to event that will be in initial state when request are active
+	*/
+	HANDLE				RequestEvent;
+	/*
+	Semaphore that will be owned when callout in processing
+	*/
+	SEMAPHORE			CalloutSema;
+	/*
+	Status of last operation
+	*/
+	volatile NTSTATUS	LastStatus;
+	/*
+	Handle to event that will be in initial state when request are complited
+	*/
+	HANDLE				CompliteEvent;
+	/*
+	Lenght of pending message in bytes
+	*/
+	ULONG				PendingMsgLen;
+	/*
+	Pointer to pending message
+	*/
+	pCvcCLMsg			pMsgPending;
+
+}CvcConnection, *pCvcConnection;
+
+#ifndef CVCMESSAGE_COMMON
+/***/#define CVCMESSAGE_COMMON sizeof(volatile NTSTATUS *) + sizeof(HANDLE)
 #endif
 
+typedef struct _ConnectionRequest {
+	pCvcConnection Connection;
+	HANDLE CompliteEvent;
+}ConnectionRequest,* pConnectionRequest;
+
 typedef struct _CvcNull {
-	CvcMsgTypeCL Type;
+	CvcMsgTypeCL		Type;
 }CvcNull, *pCvcNull;
 
+typedef struct _CvcAddConnection {
+	CvcMsgTypeCL		Type;
+	HANDLE				SlaveHandle;
+	HANDLE				RequestEvent;
+	HANDLE				CompliteEvent;
+}CvcAddConnection, *pCvcAddConnection;
+
 typedef struct _CvcHelloWorld {
-	CvcMsgTypeCL Type;
-	DWORD Magic;
+	CvcMsgTypeCL		Type;
+	DWORD				Magic;
 }CvcHelloWorld, *pCvcHelloWorld;
 
 typedef struct _CvcRead {
-	CvcMsgTypeCL Type;
-	HANDLE Pid;
-	DWORD64 Ptr;
-	ULONG Size;
-	PVOID pOut;
+	CvcMsgTypeCL		Type;
+	HANDLE				Pid;
+	DWORD64				Ptr;
+	ULONG				Size;
+	PVOID				pOut;
 }CvcRead, *pCvcRead;
 
 typedef struct _CvcWrite {
-	CvcMsgTypeCL Type;
-	HANDLE Pid;
-	DWORD64 Ptr;
-	ULONG Size;
-	PVOID pSrc;
+	CvcMsgTypeCL		Type;
+	HANDLE				Pid;
+	DWORD64				Ptr;
+	ULONG				Size;
+	PVOID				pSrc;
 }CvcWrite, *pCvcWrite;
