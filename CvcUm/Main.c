@@ -33,7 +33,7 @@ TestThread(
 			QueryPerformanceCounter(&Start);
 
 			Status = CvcPostRead(
-				NULL,
+				pConnection,
 				Pid,
 				Ptr,
 				sizeof(WORD),
