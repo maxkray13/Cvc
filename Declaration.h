@@ -32,7 +32,7 @@ typedef struct _CvcCLMsg {
 	/*
 	Pointer to variable that will recive operation status
 	*/
-	volatile NTSTATUS *	pResultStatus;
+	volatile NTSTATUS *		pResultStatus;
 	/*
 	Event that used for synchronisation betwen kernelmode\usermode. Will be in initial state when request are complited
 	*/
@@ -66,7 +66,7 @@ typedef struct _CvcConnection {
 	*/
 	LIST_ENTRY			CvcConnectionLinks;
 	/*
-	Handle to event that will be in initial state when request are active
+	Handle to event that will be in signal state when request are exist
 	*/
 	HANDLE				RequestEvent;
 	/*
@@ -76,9 +76,9 @@ typedef struct _CvcConnection {
 	/*
 	Status of last operation
 	*/
-	volatile NTSTATUS	LastStatus;
+	volatile NTSTATUS		LastStatus;
 	/*
-	Handle to event that will be in initial state when request are complited
+	Handle to event that will be in signal state when request are complited
 	*/
 	HANDLE				CompliteEvent;
 	/*
