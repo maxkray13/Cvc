@@ -2,16 +2,9 @@
 #include "Cvc.h"
 #include "../Cse/Cse.h"
 
+#pragma comment(linker, "/export:KeUserCallbackDispatcher")
 #pragma comment( lib, "gdi32.lib" )
 #pragma comment( lib, "ntdll.lib" )
-
-DECLSPEC_IMPORT
-NTSTATUS
-NTAPI
-D3DKMTOpenAdapterFromHdc(
-	PVOID Arg
-);
-
 
 DECLSPEC_IMPORT
 NTSTATUS
@@ -22,24 +15,229 @@ NtCallbackReturn(
 	IN NTSTATUS             Status
 );
 
-HANDLE		hDummyThread = 0;
-BOOLEAN CalloutActive = FALSE;
-LIST_ENTRY	CvcMessages;
-SEMAPHORE	CvcIOSema;
+NTSTATUS
+CvcpProcessConnect(
+	PVOID Arg,
+	pConnectionRequest Request
+);
 
-#pragma comment(linker, "/export:KeUserCallbackDispatcher")
+NTSTATUS
+CvcpPostAddConnection(
+	const pCvcConnection pConnectionToAdd
+);
+
+LIST_ENTRY		CvcpConnectionsList;
+SEMAPHORE		CvcpConnectionWorkerSema;
+pCvcConnection	CvcpUserMainConnection = NULL;
 
 DWORD
-DummyThread(
+CvcpConnectionStart(
 	LPVOID Param
 ) {
 
+	const pCvcConnection TargetConnection = (pCvcConnection)Param;
+
+	if (TargetConnection != NULL) {
+
+		WaitForSingleObject(TargetConnection->RequestEvent, INFINITE);
+	}
+
 	char buff[0x60];
 	*(HDC*)buff = GetDC(NULL);
-	NTSTATUS Status = D3DKMTOpenAdapterFromHdc(buff);
-	_mm_pause();
 
-	return 0x1337;
+	pConnectionRequest pRequest = (pConnectionRequest)ALIGN_UP(
+		alloca(sizeof(ConnectionRequest) + MEMORY_ALLOCATION_ALIGNMENT),
+		MEMORY_ALLOCATION_ALIGNMENT
+	);
+
+	pRequest->Connection = TargetConnection;
+	pRequest->CompliteEvent = TargetConnection ? TargetConnection->CompliteEvent : NULL;
+
+	NTSTATUS Status = CvcpProcessConnect(
+		buff,
+		pRequest
+	);
+
+	ReleaseDC(NULL, *(HDC*)buff);
+
+	return Status;
+}
+
+NTSTATUS CvcpDispatcher(
+	const CvcMsgTypeKe Msg,
+	const PVOID Data,
+	const ULONG DataLen,
+	const pCvcConnection pConnection
+) {
+
+	const pCvcConnection TargetConnection = pConnection == NULL
+		? CvcpUserMainConnection
+		: pConnection;
+
+	if (Msg == CVCKE_DISPLAY) {
+
+		char* Buffer = alloca(DataLen);
+		sprintf(Buffer, Data);
+		CseOutputA(Buffer);
+
+		return NtCallbackReturn(NULL, 0, STATUS_SUCCESS);
+	}
+
+	WaitForSingleObject(TargetConnection->RequestEvent, INFINITE);
+
+	if (!TargetConnection->pMsgPending) {
+
+		return NtCallbackReturn(NULL, 0, STATUS_INVALID_MESSAGE);
+	}
+
+	return NtCallbackReturn(TargetConnection->pMsgPending, TargetConnection->PendingMsgLen, STATUS_SUCCESS);
+}
+
+NTSTATUS
+CvcpCreateConnection(
+	pCvcConnection * ppConnection
+) {
+
+	if (!ppConnection) {
+
+		return STATUS_INVALID_PARAMETER;
+	}
+
+	const pCvcConnection pConnection = (pCvcConnection)malloc(sizeof(CvcConnection));
+
+	if (!pConnection) {
+
+		return STATUS_NO_MEMORY;
+	}
+
+	ZeroMemory(pConnection, sizeof(CvcConnection));
+
+	pConnection->MasterId = GetCurrentThreadId();
+
+	if (!(pConnection->RequestEvent = CreateEventA(NULL, FALSE, FALSE, NULL))) {
+
+		goto FailStub;
+	}
+
+	if (!(pConnection->CompliteEvent = CreateEventA(NULL, FALSE, FALSE, NULL))) {
+
+		goto FailStub;
+	}
+
+	const BOOLEAN SecondaryConnection = ppConnection != &CvcpUserMainConnection;
+
+	pConnection->SlaveHandle = CreateThread(NULL, 0, CvcpConnectionStart, SecondaryConnection ? (LPVOID)pConnection : NULL, 0, &pConnection->SlaveId);
+
+	if (!pConnection->SlaveHandle) {
+
+		goto FailStub;
+	}
+
+	LockSemaphore(&CvcpConnectionWorkerSema);
+
+	InsertTailList(&CvcpConnectionsList, &pConnection->CvcConnectionLinks);
+
+	if (SecondaryConnection) {
+
+		if (!CvcpUserMainConnection) {
+
+			SetLastError(ERROR_CONNECTION_INVALID);
+			UnlockSemaphore(&CvcpConnectionWorkerSema);
+
+			goto FailStub;
+		}
+
+		if (!NT_SUCCESS(CvcpPostAddConnection(pConnection))) {
+
+			SetLastError(ERROR_CONNECTION_ABORTED);
+			UnlockSemaphore(&CvcpConnectionWorkerSema);
+			goto FailStub;
+		}
+	}
+
+	UnlockSemaphore(&CvcpConnectionWorkerSema);
+
+	*ppConnection = pConnection;
+
+	return STATUS_SUCCESS;
+
+FailStub:;
+
+	if (pConnection->RequestEvent) {
+
+		CloseHandle(pConnection->RequestEvent);
+	}
+
+	if (pConnection->CompliteEvent) {
+
+		CloseHandle(pConnection->CompliteEvent);
+	}
+
+	if (pConnection->SlaveHandle) {
+
+		TerminateThread(pConnection->SlaveHandle, 0);
+		CloseHandle(pConnection->SlaveHandle);
+	}
+
+	free(pConnection);
+
+	return NTSTATUS_FROM_WIN32(GetLastError());
+}
+
+VOID
+CvcpCloseConnection(
+	const pCvcConnection pConnection
+) {
+
+	if (!pConnection) {
+
+		return;
+	}
+
+	LockSemaphore(&CvcpConnectionWorkerSema);
+
+	TerminateThread(pConnection->SlaveHandle, 0);
+	CloseHandle(pConnection->SlaveHandle);
+	CloseHandle(pConnection->RequestEvent);
+	CloseHandle(pConnection->CompliteEvent);
+	RemoveEntryList(&pConnection->CvcConnectionLinks);
+	free(pConnection);
+
+	UnlockSemaphore(&CvcpConnectionWorkerSema);
+}
+
+DWORD
+CvcpThreadStart(
+	LPVOID Param
+) {
+
+	NTSTATUS Status = STATUS_SUCCESS;
+	pCvcConnection Connection = NULL;
+
+	Status = CvcpCreateConnection(&Connection);
+
+	if (!NT_SUCCESS(Status)) {
+
+		return Status;
+	}
+
+	__try {
+
+		__try {
+
+			Status = ((CvcThreadStart_t)Param)(Connection);
+		}
+		__finally {
+
+			CvcpCloseConnection(Connection);
+		}
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+
+		Status = GetExceptionCode();
+	}
+
+	return Status;
 }
 
 NTSTATUS
@@ -47,16 +245,13 @@ CvcCreate(
 	VOID
 ) {
 
-	InitializeListHead(&CvcMessages);
+	if (CvcpUserMainConnection) {
 
-	if (!(hDummyThread = CreateThread(NULL, 0, DummyThread, NULL, 0, NULL))) {
-
-		return NTSTATUS_FROM_WIN32(GetLastError());
+		return STATUS_ALREADY_COMPLETE;
 	}
 
-	CalloutActive = TRUE;
-
-	return STATUS_SUCCESS;
+	InitializeListHead(&CvcpConnectionsList);
+	return CvcpCreateConnection(&CvcpUserMainConnection);
 }
 
 VOID
@@ -64,141 +259,171 @@ CvcTerminate(
 	VOID
 ) {
 
-	CalloutActive = FALSE;
+	if (CvcpUserMainConnection) {
 
-	if (hDummyThread) {
-
-		TerminateThread(hDummyThread, 0);
-		CloseHandle(hDummyThread);
-		hDummyThread = NULL;
+		CvcpCloseConnection(CvcpUserMainConnection);
+		CvcpUserMainConnection = NULL;
 	}
 }
 
-NTSTATUS CvcpDispatcher(
-	CvcMsgTypeKe Msg,
-	PVOID Data,
-	ULONG DataLen
+VOID
+CvcWaitConnections(
+	VOID
 ) {
 
-	LockSemaphore(&CvcIOSema);
+	while (TRUE) {
 
-	if (Msg == CVCKE_DISPLAY) {
+		Sleep(0x1000);
 
-		char* Buffer = alloca(DataLen);
-		sprintf(Buffer, Data);
-		CseOutputA(Buffer);
+		LockSemaphore(&CvcpConnectionWorkerSema);
+
+		if (!CvcpUserMainConnection || CvcpConnectionsList.Blink == &CvcpUserMainConnection->CvcConnectionLinks) {
+
+			UnlockSemaphore(&CvcpConnectionWorkerSema);
+			break;
+		}
+
+		UnlockSemaphore(&CvcpConnectionWorkerSema);
 	}
-
-	if (IsListEmpty(&CvcMessages)) {
-
-		UnlockSemaphore(&CvcIOSema);
-		return NtCallbackReturn(NULL, 0, STATUS_SUCCESS);
-	}
-
-	const pCvcCLMsgHeader CLMessage =
-		CONTAINING_RECORD(
-			CvcMessages.Flink,
-			CvcCLMsgHeader,
-			CvcMessagesLinks
-		);
-
-	const ULONG MessageSize =
-		CVCHEADER_COMMON +
-		CLMessage->DataLen;
-
-	PVOID Buffer = (PVOID)ALIGN_UP(
-		alloca(MessageSize + MEMORY_ALLOCATION_ALIGNMENT),
-		MEMORY_ALLOCATION_ALIGNMENT
-	);
-
-	memcpy(Buffer, &CLMessage->pResultStatus, MessageSize);
-
-	RemoveEntryList(&CLMessage->CvcMessagesLinks);
-
-	free(CLMessage);
-
-	UnlockSemaphore(&CvcIOSema);
-
-	return NtCallbackReturn(Buffer, MessageSize, STATUS_SUCCESS);
 }
 
+BOOLEAN
+CvcConnectionActive(
+	const pCvcConnection pConnection
+) {
+
+	const pCvcConnection TargetConnection = pConnection == NULL
+		? CvcpUserMainConnection
+		: pConnection;
+
+	BOOLEAN ConnectionActive;
+
+	LockSemaphore(&TargetConnection->CalloutSema);
+
+	ConnectionActive = TargetConnection->LastStatus != STATUS_CONNECTION_DISCONNECTED;
+
+	UnlockSemaphore(&TargetConnection->CalloutSema);
+
+	return ConnectionActive;
+}
 
 NTSTATUS
-CvcPostEx(
-	const HANDLE	Event,
-	const PVOID		pData,
-	const ULONG		DataLen
+CvcSpawnThread(
+	const CvcThreadStart_t ThreadStart
 ) {
 
-	if (!CalloutActive) {
+	HANDLE Master = CreateThread(NULL, 0, CvcpThreadStart, (LPVOID)ThreadStart, 0, NULL);
 
-		return STATUS_CONNECTION_DISCONNECTED;
-	}
-
-	volatile NTSTATUS Status = STATUS_SUCCESS;
-
-	if (!ResetEvent(Event)) {
+	if (!Master) {
 
 		return NTSTATUS_FROM_WIN32(GetLastError());
 	}
 
-	const ULONG MessageSize =
-		FIELD_OFFSET(CvcCLMsgHeader, Data) +
-		DataLen;
+	CloseHandle(Master);
 
-	pCvcCLMsgHeader Message = (pCvcCLMsgHeader)malloc(MessageSize);
+	return STATUS_SUCCESS;
+}
 
-	if (Message == NULL) {
+NTSTATUS
+CvcPostEx(
+	const PVOID pData,
+	const ULONG DataLen,
+	const pCvcConnection pConnection
+) {
 
-		return STATUS_NO_MEMORY;
+	const pCvcConnection TargetConnection = pConnection == NULL
+		? CvcpUserMainConnection
+		: pConnection;
+
+	LockSemaphore(&TargetConnection->CalloutSema);
+
+	if (!TargetConnection) {
+
+		UnlockSemaphore(&TargetConnection->CalloutSema);
+		return STATUS_CONNECTION_INVALID;
 	}
 
-	ZeroMemory(Message, MessageSize);
+	if (TargetConnection->LastStatus == STATUS_CONNECTION_DISCONNECTED ) {
 
-	Message->DataLen = DataLen;
-	memcpy(&Message->Data, pData, DataLen);
-	Message->Event = Event;
-	Message->pResultStatus = &Status;
+		UnlockSemaphore(&TargetConnection->CalloutSema);
+		return STATUS_CONNECTION_DISCONNECTED;
+	}
 
-	LockSemaphore(&CvcIOSema);
-	InsertTailList(&CvcMessages, &Message->CvcMessagesLinks);
-	UnlockSemaphore(&CvcIOSema);
+	const ULONG MessageSize =
+		CVCMESSAGE_COMMON +
+		DataLen;
+
+	TargetConnection->PendingMsgLen = MessageSize;
+
+	TargetConnection->pMsgPending = (pCvcCLMsg)ALIGN_UP(
+		alloca(MessageSize + MEMORY_ALLOCATION_ALIGNMENT),
+		MEMORY_ALLOCATION_ALIGNMENT
+	);
+
+	ZeroMemory(TargetConnection->pMsgPending, MessageSize);
+	TargetConnection->pMsgPending->pResultStatus = &TargetConnection->LastStatus;
+	TargetConnection->pMsgPending->CompliteEvent = TargetConnection->CompliteEvent;
+	memcpy(&TargetConnection->pMsgPending->Data, pData, DataLen);
+
+	SetEvent(TargetConnection->RequestEvent);
 
 	DWORD ExitCode = 0;
 
-	while (GetExitCodeThread(hDummyThread, &ExitCode) && ExitCode == STILL_ACTIVE) {
+	while (GetExitCodeThread(TargetConnection->SlaveHandle, &ExitCode) && ExitCode == STILL_ACTIVE) {
 
-		if (WaitForSingleObject(Event, 0x1000) == WAIT_OBJECT_0) {
+		if (WaitForSingleObject(TargetConnection->CompliteEvent, 0x1000) == WAIT_OBJECT_0) {
 
 			break;
 		}
 	}
-	
-	if (ExitCode != STILL_ACTIVE) {
 
-		CvcTerminate();
+	NTSTATUS Status;
 
-		return STATUS_CONNECTION_DISCONNECTED;
+	if (ExitCode == STILL_ACTIVE) {
+
+		Status = TargetConnection->LastStatus;
 	}
+	else {
+
+		Status = TargetConnection->LastStatus = STATUS_CONNECTION_DISCONNECTED;
+	}
+
+	TargetConnection->pMsgPending = NULL;
+
+	UnlockSemaphore(&TargetConnection->CalloutSema);
 
 	return Status;
 }
 
 NTSTATUS
+CvcpPostAddConnection(
+	const pCvcConnection pConnectionToAdd
+) {
+
+	CvcAddConnection AddConnection;
+	AddConnection.Type = CVCCL_ADD_CONNECTION;
+	AddConnection.SlaveHandle = pConnectionToAdd->SlaveHandle;
+	AddConnection.RequestEvent = pConnectionToAdd->RequestEvent;
+	AddConnection.CompliteEvent = pConnectionToAdd->CompliteEvent;
+
+	return CvcPostEx(&AddConnection, sizeof(AddConnection), NULL);
+}
+
+NTSTATUS
 CvcPostHelloWorld(
-	const HANDLE Event
+	const pCvcConnection pCurrentConnection
 ) {
 
 	CvcHelloWorld HelloWorld;
 	HelloWorld.Type = CVCCL_HELLO_WORLD;
 	HelloWorld.Magic = ' cvC';
 
-	return CvcPostEx(Event, &HelloWorld, sizeof(HelloWorld));
+	return CvcPostEx(&HelloWorld, sizeof(HelloWorld), pCurrentConnection);
 }
 
 NTSTATUS
 CvcPostRead(
-	const HANDLE Event,
+	const pCvcConnection pCurrentConnection,
 	const HANDLE Pid,
 	const DWORD64 Ptr,
 	const ULONG Size,
@@ -212,13 +437,13 @@ CvcPostRead(
 	Read.Size = Size;
 	Read.pOut = pOut;
 
-	return CvcPostEx(Event, &Read, sizeof(Read));
+	return CvcPostEx(&Read, sizeof(Read), pCurrentConnection);
 }
 
 
 NTSTATUS
 CvcPostWrite(
-	const HANDLE Event,
+	const pCvcConnection pCurrentConnection,
 	const HANDLE Pid,
 	const DWORD64 Ptr,
 	const ULONG Size,
@@ -232,5 +457,5 @@ CvcPostWrite(
 	Write.Size = Size;
 	Write.pSrc = pSrc;
 
-	return CvcPostEx(Event, &Write, sizeof(Write));
+	return CvcPostEx(&Write, sizeof(Write), pCurrentConnection);
 }
