@@ -34,7 +34,7 @@ typedef struct _CvcCLMsg {
 	*/
 	volatile NTSTATUS *		pResultStatus;
 	/*
-	Event that used for synchronisation betwen kernelmode\usermode. Will be in initial state when request are complited
+	Event that used for synchronisation betwen kernelmode\usermode. Will be in signal state when request are complited
 	*/
 	HANDLE				CompliteEvent;
 	/*
@@ -97,28 +97,28 @@ typedef struct _CvcConnection {
 #endif
 
 typedef struct _ConnectionRequest {
-	pCvcConnection Connection;
-	HANDLE CompliteEvent;
+	pCvcConnection 			Connection;
+	HANDLE 				CompliteEvent;
 }ConnectionRequest,* pConnectionRequest;
 
 typedef struct _CvcNull {
-	CvcMsgTypeCL		Type;
+	CvcMsgTypeCL			Type;
 }CvcNull, *pCvcNull;
 
 typedef struct _CvcAddConnection {
-	CvcMsgTypeCL		Type;
+	CvcMsgTypeCL			Type;
 	HANDLE				SlaveHandle;
 	HANDLE				RequestEvent;
 	HANDLE				CompliteEvent;
 }CvcAddConnection, *pCvcAddConnection;
 
 typedef struct _CvcHelloWorld {
-	CvcMsgTypeCL		Type;
+	CvcMsgTypeCL			Type;
 	DWORD				Magic;
 }CvcHelloWorld, *pCvcHelloWorld;
 
 typedef struct _CvcRead {
-	CvcMsgTypeCL		Type;
+	CvcMsgTypeCL			Type;
 	HANDLE				Pid;
 	DWORD64				Ptr;
 	ULONG				Size;
@@ -126,7 +126,7 @@ typedef struct _CvcRead {
 }CvcRead, *pCvcRead;
 
 typedef struct _CvcWrite {
-	CvcMsgTypeCL		Type;
+	CvcMsgTypeCL			Type;
 	HANDLE				Pid;
 	DWORD64				Ptr;
 	ULONG				Size;
