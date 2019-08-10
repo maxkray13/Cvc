@@ -334,14 +334,13 @@ CvcPostEx(
 	const pCvcConnection TargetConnection = pConnection == NULL
 		? CvcpUserMainConnection
 		: pConnection;
-
-	LockSemaphore(&TargetConnection->CalloutSema);
-
+	
 	if (!TargetConnection) {
-
-		UnlockSemaphore(&TargetConnection->CalloutSema);
+		
 		return STATUS_CONNECTION_INVALID;
 	}
+
+	LockSemaphore(&TargetConnection->CalloutSema);
 
 	if (TargetConnection->LastStatus == STATUS_CONNECTION_DISCONNECTED ) {
 
