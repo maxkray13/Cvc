@@ -133,16 +133,11 @@ CvcpCreateConnection(
 		goto FailStub;
 	}
 
-	LockSemaphore(&CvcpConnectionWorkerSema);
-
-	InsertTailList(&CvcpConnectionsList, &pConnection->CvcConnectionLinks);
-
 	if (SecondaryConnection) {
 
 		if (!CvcpUserMainConnection) {
 
 			SetLastError(ERROR_CONNECTION_INVALID);
-			UnlockSemaphore(&CvcpConnectionWorkerSema);
 
 			goto FailStub;
 		}
@@ -150,10 +145,14 @@ CvcpCreateConnection(
 		if (!NT_SUCCESS(CvcpPostAddConnection(pConnection))) {
 
 			SetLastError(ERROR_CONNECTION_ABORTED);
-			UnlockSemaphore(&CvcpConnectionWorkerSema);
+
 			goto FailStub;
 		}
 	}
+
+	LockSemaphore(&CvcpConnectionWorkerSema);
+
+	InsertTailList(&CvcpConnectionsList, &pConnection->CvcConnectionLinks);
 
 	UnlockSemaphore(&CvcpConnectionWorkerSema);
 
